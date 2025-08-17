@@ -1,6 +1,6 @@
 // main.js
 function wsURL() {
-  const prod = 'https://maze-server-dtar.onrender.com'; // 上线时替换
+  const prod = 'https://maze-server-dtar.onrender.com/'; // —— 上线请替换 —— //
   if (location.protocol === 'https:') return prod;
   return 'ws://127.0.0.1:8765'; // 本地调试
 }
@@ -25,6 +25,15 @@ let timeAcc=0, lastAInputSent=0;
 
 let bShape=0, bRot=0;
 let draggingSrc=null, draggingGhost=null;
+let resetBtnRect=null;
+
+// —— A 客户端预测 & 校准 —— 
+let localA = {x:0, y:0, has:false};
+let lastServerA = {x:0, y:0};
+const SPEED_GRID_PER_SEC = 150 / TILE;   // 与服务端一致
+
+// —— B 侧插值缓冲（100ms） —— 
+let interp = { last:{x:0,y:0,t:0}, next:{x:0,y:0,t:0}, ready:false };
 
 const keysDown={};
 window.addEventListener('keydown', e=>{
@@ -34,6 +43,10 @@ window.addEventListener('keydown', e=>{
     if (e.key==='e'||e.key==='E') bRot = (bRot+1)%4;
     if (e.key>='1' && e.key<='8') bShape = (e.key.charCodeAt(0)-'1'.charCodeAt(0))%8;
   }
+  // 可选：按 R 快速回主菜单
+  if (e.key==='r' || e.key==='R'){
+    if (ws && ws.readyState===1) ws.send(JSON.stringify({t:'reset'}));
+  }
 });
 window.addEventListener('keyup', e=>{ keysDown[e.key.toLowerCase()]=false; });
 
@@ -41,8 +54,14 @@ let mouse={x:0,y:0,down:false,button:0};
 window.addEventListener('mousemove', e=>{
   const r=canvas.getBoundingClientRect(); mouse.x=e.clientX-r.left; mouse.y=e.clientY-r.top;
 });
-window.addEventListener('mousedown', e=>{ mouse.down=true; mouse.button=e.button; handleMouseDown(); e.preventDefault(); });
-window.addEventListener('mouseup', ()=>{ mouse.down=false; handleMouseUp(); });
+window.addEventListener('mousedown', e=>{
+  mouse.down=true; mouse.button=e.button;
+  handleMouseDown();
+  e.preventDefault();
+});
+window.addEventListener('mouseup', ()=>{
+  mouse.down=false; handleMouseUp();
+});
 window.addEventListener('contextmenu', e=>e.preventDefault());
 window.addEventListener('wheel', e=>{
   if (!state || role!=='B' || state.phase!=='BUILD') return;
@@ -62,9 +81,11 @@ function startClient(r){
 window.startClient=startClient;
 
 function showReady(on){
-  document.getElementById('ready').style.display = on?'flex':'none';
+  const el = document.getElementById('ready');
+  if (!el) return;
+  el.style.display = on?'flex':'none';
   const title=document.getElementById('readyTitle');
-  title.textContent = role==='A' ? 'A：等待 B 准备' : 'B：等待 A 准备';
+  if (title) title.textContent = role==='A' ? 'A：等待 B 准备' : 'B：等待 A 准备';
 }
 function toggleReady(on){
   if (ws && ws.readyState===1) ws.send(JSON.stringify({t:'ready', on}));
@@ -82,9 +103,31 @@ function connectWS(){
     const msg=JSON.parse(ev.data);
     if (msg.t==='state'){
       state=msg.s;
-      // 进入/退出准备界面
-      if (state.phase==='LOBBY') showReady(true);
-      else showReady(false);
+
+      // LOBBY -> 准备层可见；其它阶段隐藏
+      if (state.phase==='LOBBY') showReady(true); else showReady(false);
+
+      // 服务器位置同步
+      if (state && state.A){
+        lastServerA.x = state.A.x;
+        lastServerA.y = state.A.y;
+        const now = performance.now();
+        // B 侧插值缓冲帧
+        if (!interp.ready){
+          interp.last = {x: state.A.x, y: state.A.y, t: now-100};
+          interp.next = {x: state.A.x, y: state.A.y, t: now};
+          interp.ready = true;
+        }else{
+          interp.last = interp.next;
+          interp.next = {x: state.A.x, y: state.A.y, t: now};
+        }
+        // A 初次对齐
+        if (!localA.has){
+          localA.x = lastServerA.x;
+          localA.y = lastServerA.y;
+          localA.has = true;
+        }
+      }
     }else if (msg.t==='ack' && !msg.ok){
       console.warn('[ACK FAIL]', msg.cmd, msg.reason);
     }else if (msg.t==='err'){
@@ -97,7 +140,7 @@ function connectWS(){
   };
 }
 
-// —— 单画面尺寸：A 只需要地图+HUD；B 需要地图+右侧形状面板（+320） ——
+// —— 单画面尺寸：A=地图宽；B=地图宽+右侧面板（+320） ——
 function resizeCanvas(){
   const width = (role==='B') ? (MAP_SIZE + 320) : MAP_SIZE;
   canvas.width = width;
@@ -117,6 +160,12 @@ function BConfirmBtn(){
 
 // —— 鼠标交互 —— 
 function handleMouseDown(){
+  // 结算按钮：返回主菜单
+  if (resetBtnRect && mouse.button===0 && inRect(mouse.x, mouse.y, resetBtnRect)){
+    if (ws && ws.readyState===1) ws.send(JSON.stringify({t:'reset'}));
+    return;
+  }
+
   if (!state || role!=='B' || state.win) return;
   const onMap = inRect(mouse.x, mouse.y, BMapRect());
   if (state.phase==='BUILD'){
@@ -173,13 +222,38 @@ let last=performance.now();
 function tick(){
   const now=performance.now(), dt=(now-last)/1000; last=now; timeAcc+=dt;
 
-  // A 输入（仅 PLAY）
+  // A 输入（仅 PLAY）+ 客户端预测
   if (role==='A' && state && state.phase==='PLAY' && ws && ws.readyState===1){
     const tnow=performance.now();
     if (tnow - lastAInputSent > 33){
       const keys={ w:!!keysDown['w'], a:!!keysDown['a'], s:!!keysDown['s'], d:!!keysDown['d'] };
       ws.send(JSON.stringify({t:'input', keys}));
       lastAInputSent=tnow;
+    }
+    // —— 本地预测 —— 
+    if (localA.has){
+      let vx = (keysDown['d']?1:0) - (keysDown['a']?1:0);
+      let vy = (keysDown['s']?1:0) - (keysDown['w']?1:0);
+      if (vx!==0 || vy!==0){
+        const len = Math.hypot(vx, vy);
+        vx /= len; vy /= len;
+        localA.x += vx * SPEED_GRID_PER_SEC * dt;
+        localA.y += vy * SPEED_GRID_PER_SEC * dt;
+      }
+      // —— 服务器校准：轻柔拉回 —— 
+      const dx = lastServerA.x - localA.x;
+      const dy = lastServerA.y - localA.y;
+      const dist2 = dx*dx + dy*dy;
+      if (dist2 > 0.25) {
+        // 距离>0.5格：直接对齐
+        localA.x = lastServerA.x;
+        localA.y = lastServerA.y;
+      } else {
+        // 小偏差：插值靠拢
+        const k = 0.35;
+        localA.x += dx * k;
+        localA.y += dy * k;
+      }
     }
   }
 
@@ -200,7 +274,7 @@ function render(){
   }
 
   if (role==='A'){
-    // A：BUILD 阶段不显示地图（按你要求“什么都看不到”）
+    // A：BUILD 阶段不显示地图
     if (state.phase==='BUILD'){
       drawCenterText('B 正在布置迷宫…');
     }else{
@@ -215,13 +289,24 @@ function render(){
     else drawHudBPlay();
   }
 
-  // 结算横幅
+  // 结算横幅 + 返回主菜单按钮
   if (state.win){
     const ww=canvas.width, hh=90, ox=0, oy=MAP_SIZE/2 - hh/2;
     ctx.fillStyle='rgba(0,0,0,.7)'; ctx.fillRect(ox, oy, ww, hh);
     ctx.fillStyle=UI; ctx.font='22px system-ui';
     const msg = state.win==='A' ? 'A 胜利！逃脱成功' : 'B 胜利！围杀/陷阱或超时';
-    ctx.fillText(msg, ox + ww/2 - 140, oy + 58);
+    ctx.fillText(msg, ox + ww/2 - 140, oy + 40);
+
+    // —— 返回主菜单按钮 —— 
+    const bw = 160, bh = 44;
+    const bx = ww/2 - bw/2, by = oy + 90;
+    ctx.fillStyle = '#394159';
+    roundRect(ctx, bx, by, bw, bh, 10, true);
+    ctx.fillStyle = UI; ctx.font='18px system-ui';
+    ctx.fillText('返回主菜单', bx + 28, by + 28);
+    resetBtnRect = {x: bx, y: by, w: bw, h: bh};
+  } else {
+    resetBtnRect = null;
   }
 }
 
@@ -261,8 +346,18 @@ function drawMap(ox,oy, showPlayer, revealPlayer){
   }
   // 玩家（压在网格上面）
   if (showPlayer || revealPlayer){
+    let drawAx = state.A.x, drawAy = state.A.y;
+    if (role==='A' && state.phase==='PLAY' && localA.has){
+      drawAx = localA.x; drawAy = localA.y;
+    }else if (role==='B' && interp.ready){
+      const now = performance.now();
+      const span = Math.max(1, interp.next.t - interp.last.t); // ms
+      const t = Math.min(1, Math.max(0, (now - interp.next.t + 100) / span)); // 100ms 缓冲
+      drawAx = interp.last.x + (interp.next.x - interp.last.x) * t;
+      drawAy = interp.last.y + (interp.next.y - interp.last.y) * t;
+    }
     ctx.fillStyle=PLAYER_C;
-    ctx.beginPath(); ctx.arc(ox+state.A.x*TILE, oy+state.A.y*TILE, TILE*0.35, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(ox+drawAx*TILE, oy+drawAy*TILE, TILE*0.35, 0, Math.PI*2); ctx.fill();
   }
 
   // 建造预览（仅 B & BUILD）
@@ -318,7 +413,8 @@ function drawHudBBuild(){
   ctx.fillText('左键拼块 / 右键陷阱 / Q,E 或滚轮旋转 / 1-8选择 / 右下确认', 12, y0+18+26);
   ctx.fillStyle=UI; ctx.font='16px system-ui';
   ctx.fillText(`建造倒计时：${Math.max(0,(state.buildTime|0))}s`, 12, y0+18+26+26);
-  ctx.fillText(`陷阱：x${TRAP_STOCK_INIT - (state.traps?.length||0)}`, canvas.width-140, y0+18+26+26);
+  const trapLeft = (window.TRAP_STOCK_INIT ?? 3) - (state.traps?.length||0);
+  ctx.fillText(`陷阱：x${trapLeft}`, canvas.width-140, y0+18+26+26);
 
   drawPalette(MAP_SIZE + 16, 12);
   const btn=BConfirmBtn();
@@ -395,6 +491,7 @@ function drawPalette(px,py){
     ctx.fillStyle=UI_MUTED;
     ctx.fillText(String(i+1), r.x+6, r.y+16);
     ctx.fillText('x'+stock, r.x+r.w-42, r.y+r.h-10);
+    // 鼠标点选
     if (mouse.down && mouse.button===0 && inRect(mouse.x,mouse.y,r) && stock>0) bShape=i;
   }
 }
