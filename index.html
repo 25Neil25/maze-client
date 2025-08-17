@@ -1,0 +1,162 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Maze Duel (Web Client)</title>
+<style>
+  html,body{margin:0;background:#121216;color:#eaeaea;font-family:system-ui,Segoe UI,Arial}
+  #ui{position:fixed;left:12px;top:10px}
+  a,button{color:#eaeaea}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/p5@1.9.2/lib/p5.min.js"></script>
+<div id="ui">
+  <div>房间：<span id="room"></span>　角色：<span id="role"></span></div>
+  <div>按键：A 用 WASD 移动；B 用数字 1-8 选形，Q/E 或滚轮旋转，点击放置；点“确认开始”进入对战。</div>
+</div>
+<script>
+const TILE = 32;          // 1格=32px
+const GRID_N = 18;
+let ws, state=null;
+let role = 'A';           // 由 URL 参数覆盖
+let room = 'default';
+
+function qs(key, def=null){
+  const u=new URL(location.href);
+  return u.searchParams.get(key) || def;
+}
+
+function wsURL(){
+  const prod = 'https://maze-server-dtar.onrender.com/'; // ← 替换成你的 Render 域名
+  if (location.protocol==='https:') return prod;
+  // 本地调试（页面走 http），优先连本地后端
+  return 'ws://127.0.0.1:8765';
+}
+
+function setup(){
+  createCanvas(GRID_N*TILE + 320, GRID_N*TILE + 100); // 右侧 320px 给 B 的面板
+  role = (qs('role','A')==='B') ? 'B' : 'A';
+  room = qs('room','default');
+  document.getElementById('role').textContent = role;
+  document.getElementById('room').textContent = room;
+
+  ws = new WebSocket(wsURL());
+  ws.onopen = ()=>{
+    ws.send(JSON.stringify({t:'join', room, role}));
+  };
+  ws.onmessage = ev=>{
+    const msg = JSON.parse(ev.data);
+    if (msg.t==='state') state = msg.s;
+  };
+}
+
+let bShape = 0, bRot = 0;
+
+function draw(){
+  background(18);
+  if(!state){
+    fill(200); text('连接中…', 20, 26); return;
+  }
+
+  // 画地图
+  push();
+  drawMap();
+  pop();
+
+  // HUD
+  fill(220);
+  textSize(16);
+  if (state.phase==='BUILD'){
+    text(`阶段① 建造 | 倒计时: ${Math.max(0, state.buildTime|0)}s`, 12, GRID_N*TILE + 24);
+  }else if(state.phase==='PLAY'){
+    text(`阶段② 对战 | 倒计时: ${Math.max(0, state.timeLeft|0)}s`, 12, GRID_N*TILE + 24);
+  }
+  if (state.win){
+    textSize(22);
+    textAlign(CENTER);
+    text(`${state.win} 胜利!  刷新或重新进入房间再开一局`, width/2, GRID_N*TILE/2);
+    textAlign(LEFT);
+  }
+
+  // A 输入：每帧发（简单做法）
+  if (role==='A' && state.phase==='PLAY' && !state.win && ws.readyState===1){
+    const keys = {
+      w: keyIsDown(87), a: keyIsDown(65),
+      s: keyIsDown(83), d: keyIsDown(68)
+    };
+    ws.send(JSON.stringify({t:'input', keys}));
+  }
+}
+
+function drawMap(){
+  // 地图区域
+  noStroke();
+  // 地板
+  fill(28); rect(0,0, GRID_N*TILE, GRID_N*TILE);
+  // 起点/终点
+  fill(180,120,200); rect(state.start[0]*TILE, state.start[1]*TILE, TILE, TILE);
+  fill(state.exitOpen? color(90,200,120): color(120,60,60));
+  rect(state.end[0]*TILE, state.end[1]*TILE, TILE, TILE);
+  // 墙
+  fill(60,60,80);
+  for(const [x,y] of state.walls){
+    rect(x*TILE, y*TILE, TILE, TILE);
+  }
+  // 钥匙
+  fill(120,220,255);
+  for(const [x,y] of state.keys){
+    circle(x*TILE+TILE/2, y*TILE+TILE/2, TILE*0.5);
+  }
+  // 陷阱
+  for(const t of state.traps){
+    const [x,y]=t.cell;
+    fill(t.active ? color(235,60,60) : color(200,110,30));
+    rect(x*TILE, y*TILE, TILE, TILE);
+  }
+  // A 玩家
+  fill(240,240,120);
+  circle(state.A.x*TILE, state.A.y*TILE, TILE*0.7);
+
+  // 右侧 B 面板（简单）
+  const px = GRID_N*TILE + 12, py = 12;
+  fill(32); rect(GRID_N*TILE, 0, 320, GRID_N*TILE);
+  fill(210); textSize(16);
+  text(`B 面板`, px, py+16);
+  text(`选择: ${bShape+1} 旋转: ${bRot}`, px, py+40);
+  text(`滚轮/QE旋转，1-8选形，左键放置`, px, py+64);
+  text(`点击此处确认开始`, width-190, height-68);
+
+  // 确认按钮
+  fill(55); rect(width-200, height-56, 180, 40, 8);
+  fill(240); text('确认开始', width-200+24, height-56+26);
+}
+
+function mousePressed(){
+  if (!state || role!=='B' || state.win) return;
+  // 点击右下确认
+  if (mouseX>width-200 && mouseY>height-56){
+    ws.send(JSON.stringify({t:'confirm'}));
+    return;
+  }
+  // 地图区左键：放置
+  if (mouseButton===LEFT && mouseX>=0 && mouseX<GRID_N*TILE && mouseY>=0 && mouseY<GRID_N*TILE){
+    const gx = floor(mouseX/TILE), gy = floor(mouseY/TILE);
+    ws.send(JSON.stringify({t:'place', shape: bShape, rot: bRot, gx, gy}));
+  }
+  // 地图区右键：触发陷阱（示例）
+  if (mouseButton===RIGHT && mouseX>=0 && mouseX<GRID_N*TILE && mouseY>=0 && mouseY<GRID_N*TILE){
+    const gx = floor(mouseX/TILE), gy = floor(mouseY/TILE);
+    ws.send(JSON.stringify({t:'trap', cell:[gx,gy]}));
+  }
+}
+
+function mouseWheel(e){
+  if (role!=='B') return false;
+  bRot = (bRot + (e.deltaY<0 ? 1 : -1) + 4) % 4;
+  return false; // 阻止页面滚动
+}
+
+function keyPressed(){
+  if (role!=='B') return;
+  if (key==='Q' || key==='q') bRot = (bRot + 3) % 4;
+  if (key==='E' || key==='e') bRot = (bRot + 1) % 4;
+  if (key>='1' && key<='8') bShape = (key.charCodeAt(0) - '1'.charCodeAt(0)) % 8;
+}
+</script>
