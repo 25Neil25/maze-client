@@ -2,9 +2,13 @@
 <meta charset="utf-8" />
 <title>迷宫对抗（联机版）</title>
 <style>
-  html,body{margin:0;background:#121216;color:#eaeaea;font-family:-apple-system,Segoe UI,Arial}
-  #hud{position:fixed;left:10px;top:10px;font-size:14px;color:#bbb}
-  #join{position:fixed;inset:0;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center}
+  html,body{height:100%;margin:0;background:#121216;color:#eaeaea;font-family:-apple-system,Segoe UI,Arial}
+  .wrap{min-height:100%;display:flex;align-items:center;justify-content:center}
+  #hud{position:fixed;left:12px;top:10px;font-size:14px;color:#bbb}
+  #join,#ready{
+    position:fixed;inset:0;background:rgba(0,0,0,.65);
+    display:flex;align-items:center;justify-content:center
+  }
   .card{background:#1b1d24;padding:20px;border-radius:12px;min-width:320px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
   .card h3{margin:0 0 12px;color:#eee}
   label{display:block;margin:8px 0;color:#ccc}
@@ -12,9 +16,10 @@
   .row{display:flex;gap:10px;margin-top:12px}
   button{background:#2e3445;border:1px solid #3c4358;border-radius:10px;color:#eaeaea;padding:10px 16px;cursor:pointer}
   button:hover{background:#394159}
-  canvas{display:block;margin:0 auto}
+  canvas{display:block;max-width:100vw;max-height:100vh}
 </style>
-<div id="hud">WASD移动（A）｜B：左键拼块、右键陷阱（建造）/ 右键监视（对战）、滚轮/QE旋转、1-8选形、点击右下确认</div>
+
+<div id="hud">A：WASD移动｜B：建造期=左键拼块/右键陷阱/QE或滚轮旋转/1-8选形/点确认；对战期=右键监视、左键陷阱或拖墙</div>
 
 <div id="join">
   <div class="card">
@@ -26,9 +31,23 @@
       <button onclick="startClient('A')">我扮演 A（玩家）</button>
       <button onclick="startClient('B')">我扮演 B（关卡）</button>
     </div>
-    <p style="color:#888;margin-top:10px">进入后把同一个房间号发给朋友，TA 选择另一个角色进入即可。</p>
+    <p style="color:#888;margin-top:10px">把相同房间号发给朋友，让对方选另一个角色进入</p>
   </div>
 </div>
 
-<canvas id="cv"></canvas>
+<div id="ready" style="display:none">
+  <div class="card" style="text-align:center">
+    <h3 id="readyTitle">准备开始</h3>
+    <p id="readyHint" style="color:#aaa;margin:8px 0 16px">双方都点准备后开始</p>
+    <div class="row" style="justify-content:center">
+      <button id="btnReady" onclick="toggleReady(true)">我已准备</button>
+      <button onclick="toggleReady(false)">取消准备</button>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+  <canvas id="cv"></canvas>
+</div>
+
 <script src="main.js"></script>
