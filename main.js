@@ -3,7 +3,7 @@
 // ====== 配置你的后端地址 ======
 // 部署后改成你的 Render/VPS 域名：比如 wss://maze-xxx.onrender.com
 function wsURL() {
-  const prod = 'wss://REPLACE_WITH_YOUR_SERVER_DOMAIN';
+  const prod = 'https://maze-server-dtar.onrender.com';
   if (location.protocol === 'https:') return prod;
   return 'ws://127.0.0.1:8765'; // 本地联调
 }
